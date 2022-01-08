@@ -1,0 +1,23 @@
+[package]
+name = "wren-nom"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+# Controls LLVM's link time optimizations.
+#
+# Can produce better optimized code, using whole-program analysis,
+# at the cost of longer linking time.
+lto = true
+# Less parallel generation units means slower
+# compilation for potentially faster code.
+codegen-units = 1
+# Include debug symbols.
+debug = true
+
+[dependencies]
+nom = "7"
+nom_locate = "4"
+smol_str = "0.1"
