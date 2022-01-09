@@ -1,24 +1,17 @@
 //! Lexical analysis.
 use crate::{
-    glue::{expect, Error as Error2, IResult as IResult2, Span as Span2, State},
+    glue::{expect, fold_many_till, Error as Error2, IResult, Span, State},
     syntax::{AssignDef, ClassBody, ClassDef, DefStmt, Expr, Ident, KeywordType, Literal, Module},
-    Span,
 };
 use nom::{
     bytes::complete::tag,
     character::complete::{alpha1, digit1, line_ending, multispace0, space0},
     combinator::{all_consuming, eof, map, opt},
-    error::{context, VerboseError},
-    multi::many_till,
-    sequence::{preceded, tuple},
-    IResult,
+    error::context,
+    sequence::{preceded, terminated, tuple},
+    InputLength,
 };
 use std::cell::RefCell;
-
-#[allow(dead_code)]
-fn hello_parse(input: Span) -> IResult<Span, Span, VerboseError<Span>> {
-    nom::error::context("hello", tag("hello"))(input)
-}
 
 /// Parser entry-point.
 pub fn parse(source: &str) -> (Module, Vec<Error2>) {
@@ -29,15 +22,19 @@ pub fn parse(source: &str) -> (Module, Vec<Error2>) {
 
     // Mutable list of errors is smuggled into the parsers via
     // the input span.
-    let input = Span2::new_extra(source, State(&errors));
+    let input = Span::new_extra(source, State(&errors));
 
     // We expect the parser to consume the whole source input, and
     // produce some kind of syntax tree regardless of errors.
     //
     // If a panic occurs, it's considered a bug in the parser.
-    let (_, module) = all_consuming(parse_module)(input).expect("parser must succeed");
+    let (rest, module) = expect(all_consuming(parse_module), "source not consumed")(input)
+        .expect("parser must succeed");
 
-    (module, errors.into_inner())
+    println!("{:#?}, {}", rest, rest.input_len());
+    println!("{:#?}", errors);
+
+    (module.unwrap(), errors.into_inner())
 
     // nom::combinator::map(
     //     nom::multi::many_till(parse_def_stmt, nom::combinator::eof),
@@ -46,35 +43,49 @@ pub fn parse(source: &str) -> (Module, Vec<Error2>) {
     // .map(|(_input, output)| output)
 }
 
-fn parse_module(input: Span2) -> IResult2<Module> {
+fn parse_module(input: Span) -> IResult<Module> {
+    let parsers = map(
+        expect(parse_def_stmt, "failed to parse definition statement"),
+        |maybe_stmt| maybe_stmt.unwrap_or(DefStmt::Error),
+    );
+
     map(
         // Keep consuming statements until end-of-file
-        many_till(
-            map(
-                expect(parse_def_stmt, "failed to parse definition statement"),
-                |maybe_stmt| maybe_stmt.unwrap_or(DefStmt::Error),
-            ),
-            eof,
-        ),
-        |(stmts, _rest)| Module { stmts },
+        fold_many_till(parsers, eof, Vec::new, |mut acc: Vec<_>, stmt| {
+            // Skip empty lines.
+            if !matches!(stmt, DefStmt::Empty) {
+                acc.push(stmt);
+            }
+
+            acc
+        }),
+        // many_till(
+        //     map(
+        //         expect(parse_def_stmt, "failed to parse definition statement"),
+        //         |maybe_stmt| maybe_stmt.unwrap_or(DefStmt::Error),
+        //     ),
+        //     eof,
+        // ),
+        // |(stmts, _rest)| Module { stmts },
+        |stmts| Module { stmts },
     )(input)
     // .map(|(_input, output)| output)
 }
 
 /// Definition statements.
-fn parse_def_stmt(input: Span2) -> IResult2<DefStmt> {
+fn parse_def_stmt(input: Span) -> IResult<DefStmt> {
     preceded(
         multispace0,
         nom::branch::alt((
+            map(parse_empty_stmt, |_| DefStmt::Empty),
             map(parse_assign_def, |x| DefStmt::AssignDef(x)),
             map(parse_class_def, |x| DefStmt::Class(x)),
             // TODO: Simple Statement
-            map(parse_empty_def, |_| DefStmt::Empty),
         )),
     )(input)
 }
 
-fn parse_class_def(input: Span2) -> IResult2<ClassDef> {
+fn parse_class_def(input: Span) -> IResult<ClassDef> {
     map(
         tuple((
             tag("class"),
@@ -86,7 +97,7 @@ fn parse_class_def(input: Span2) -> IResult2<ClassDef> {
     )(input)
 }
 
-fn parse_inherit(input: Span2) -> IResult2<Ident> {
+fn parse_inherit(input: Span) -> IResult<Ident> {
     map(
         tuple((preceded(space0, tag("is")), parse_ident)),
         |(_kw, name)| name,
@@ -94,7 +105,7 @@ fn parse_inherit(input: Span2) -> IResult2<Ident> {
 }
 
 /// Parse the body of a class, including its parentheses.
-fn parse_class_body(input: Span2) -> IResult2<ClassBody> {
+fn parse_class_body(input: Span) -> IResult<ClassBody> {
     let body = tuple((
         preceded(space0, tag("{")),
         multispace0,
@@ -109,7 +120,7 @@ fn parse_class_body(input: Span2) -> IResult2<ClassBody> {
     )(input)
 }
 
-fn parse_assign_def(input: Span2) -> IResult2<AssignDef> {
+fn parse_assign_def(input: Span) -> IResult<AssignDef> {
     nom::error::context(
         "assign_def",
         nom::combinator::map(
@@ -135,34 +146,35 @@ fn parse_assign_def(input: Span2) -> IResult2<AssignDef> {
     )(input)
 }
 
-fn parse_empty_def(input: Span2) -> IResult2<()> {
-    map(parse_eos, |_| ())(input)
+/// Empty line.
+fn parse_empty_stmt(input: Span) -> IResult<Span> {
+    parse_eos(input)
 }
 
 /// Create a parser that will consume the given keyword
 /// from the source input, and output an identifier if
 /// it matches.
-fn parse_keyword(keyword: KeywordType) -> impl Fn(Span2) -> IResult2<Ident> {
+fn parse_keyword(keyword: KeywordType) -> impl Fn(Span) -> IResult<Ident> {
     move |input| {
-        map(tag(keyword.as_str()), |name: Span2| Ident {
+        map(tag(keyword.as_str()), |name: Span| Ident {
             name: name.fragment().into(),
         })(input)
     }
 }
 
-fn parse_number(input: Span2) -> IResult2<Literal> {
-    map(preceded(space0, digit1), |s: Span2| {
+fn parse_number(input: Span) -> IResult<Literal> {
+    map(preceded(space0, digit1), |s: Span| {
         Literal::Number(s.fragment().into())
     })(input)
 }
 
-fn parse_ident(input: Span2) -> IResult2<Ident> {
-    map(preceded(space0, alpha1), |name: Span2| Ident {
+fn parse_ident(input: Span) -> IResult<Ident> {
+    map(preceded(space0, alpha1), |name: Span| Ident {
         name: name.fragment().into(),
     })(input)
 }
 
-fn parse_eq(input: Span2) -> IResult2<Span2> {
+fn parse_eq(input: Span) -> IResult<Span> {
     nom::sequence::preceded(space0, tag("="))(input)
 }
 
@@ -173,23 +185,13 @@ fn parse_eq(input: Span2) -> IResult2<Span2> {
 /// character or end-of-file.
 ///
 /// No semicolons are allowed.
-fn parse_eos(input: Span2) -> IResult2<Span2> {
-    nom::sequence::preceded(
-        space0,
-        nom::branch::alt((line_ending, nom::combinator::eof)),
-    )(input)
+fn parse_eos(input: Span) -> IResult<Span> {
+    terminated(space0, nom::branch::alt((line_ending, eof)))(input)
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
-
-    #[test]
-    fn test_hello() {
-        println!("{:?}", hello_parse("hello\n".into()));
-        println!("{:?}", hello_parse("hello world".into()));
-        println!("{:?}", hello_parse("qwerty hello world".into()));
-    }
 
     #[test]
     fn test_assign() {
