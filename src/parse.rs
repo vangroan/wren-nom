@@ -1,7 +1,10 @@
 //! Lexical analysis.
 use crate::{
     glue::{expect, fold_many_till, Error as Error2, IResult, Span, State},
-    syntax::{AssignDef, ClassBody, ClassDef, DefStmt, Expr, Ident, KeywordType, Literal, Module},
+    syntax::{
+        AssignDef, ClassBody, ClassDef, DefStmt, Expr, Ident, KeywordType, Literal, Member,
+        MethodDef, Module,
+    },
 };
 use nom::{
     bytes::complete::tag,
@@ -31,6 +34,7 @@ pub fn parse(source: &str) -> (Module, Vec<Error2>) {
     let (rest, module) = expect(all_consuming(parse_module), "source not consumed")(input)
         .expect("parser must succeed");
 
+    println!("{:#?}", module);
     println!("{:#?}, {}", rest, rest.input_len());
     println!("{:#?}", errors);
 
@@ -52,10 +56,7 @@ fn parse_module(input: Span) -> IResult<Module> {
     map(
         // Keep consuming statements until end-of-file
         fold_many_till(parsers, eof, Vec::new, |mut acc: Vec<_>, stmt| {
-            // Skip empty lines.
-            if !matches!(stmt, DefStmt::Empty) {
-                acc.push(stmt);
-            }
+            acc.push(stmt);
 
             acc
         }),
@@ -108,15 +109,60 @@ fn parse_inherit(input: Span) -> IResult<Ident> {
 fn parse_class_body(input: Span) -> IResult<ClassBody> {
     let body = tuple((
         preceded(space0, tag("{")),
-        multispace0,
-        preceded(space0, tag("}")),
+        parse_class_members,
+        preceded(multispace0, tag("}")),
+        parse_eos,
     ));
 
     context(
         "class_body",
-        map(body, |(_, _, _)| ClassBody {
-                /* TODO: Parse methods */
-    }),
+        map(body, |(_, members, _, _)| ClassBody { members }),
+    )(input)
+}
+
+/// Parse the members of a class.
+///
+/// Members are always methods. Method types are determined
+/// by the naming convention.
+fn parse_class_members(input: Span) -> IResult<Vec<Member>> {
+    context(
+        "class_members",
+        nom::multi::fold_many0(parse_method_member, Vec::new, |mut acc: Vec<_>, member| {
+            acc.push(member);
+            acc
+        }),
+    )(input)
+}
+
+fn parse_method_member(input: Span) -> IResult<Member> {
+    context(
+        "method_member",
+        map(
+            preceded(
+                multispace0,
+                tuple((
+                    parse_ident,
+                    nom::sequence::delimited(
+                        tag("("),
+                        parse_member_params,
+                        preceded(space0, tag(")")),
+                    ),
+                )),
+            ),
+            |(name, params)| {
+                // TODO: Format signature as per Wren calling convetion.
+                let sig = format!("{}()", name.name).into();
+
+                Member::Method(MethodDef { name, sig, params })
+            },
+        ),
+    )(input)
+}
+
+fn parse_member_params(input: Span) -> IResult<Vec<Ident>> {
+    context(
+        "member_params",
+        nom::multi::separated_list0(preceded(space0, tag(",")), preceded(space0, parse_ident)),
     )(input)
 }
 
@@ -202,7 +248,7 @@ mod test {
             parse(
                 r#"
                 var x = 1
-                var y = !2
+                var y = 2
                 "#
             )
         );

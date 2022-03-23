@@ -147,7 +147,37 @@ pub struct ClassDef {
 }
 
 #[derive(Debug)]
-pub struct ClassBody {}
+pub struct ClassBody {
+    pub members: Vec<Member>,
+}
+
+/// Method or property belonging to a class body.
+#[derive(Debug)]
+pub enum Member {
+    Method(MethodDef),
+}
+
+/// Class method function definition.
+#[derive(Debug)]
+pub struct MethodDef {
+    pub name: Ident,
+    /// Complete signature, including special symbols
+    /// for property accessors.
+    ///
+    /// # Example
+    ///
+    /// ```wren
+    /// [index] {
+    ///   // ...
+    /// }
+    ///
+    /// rider=(value) {
+    ///   // ..
+    /// }
+    /// ```
+    pub sig: SmolStr,
+    pub params: Vec<Ident>,
+}
 
 /// Variable definition with assignment.
 #[derive(Debug)]
